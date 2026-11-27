@@ -113,6 +113,23 @@ def home_keyboard():
     ])
 
 
+def admin_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "📋 سجل جميع الطلبات",
+            callback_data="admin_orders"
+        )],
+        [InlineKeyboardButton(
+            "➕ طريقة إضافة النقاط",
+            callback_data="admin_points"
+        )],
+        [InlineKeyboardButton(
+            "🏠 الرئيسية",
+            callback_data="home"
+        )]
+    ])
+
+
 # =========================
 # START
 # =========================
@@ -223,6 +240,110 @@ async def show_ff_shop(query):
 
 
 # =========================
+# ADMIN ORDERS HISTORY
+# =========================
+
+async def show_admin_orders(query, page=0):
+
+    total = db.execute(
+        "SELECT COUNT(*) FROM orders"
+    ).fetchone()[0]
+
+    counts = db.execute("""
+        SELECT status, COUNT(*)
+        FROM orders
+        GROUP BY status
+    """).fetchall()
+
+    stats = dict(counts)
+
+    pending = stats.get("pending", 0)
+    completed = stats.get("completed", 0)
+    refunded = stats.get("refunded", 0)
+
+    orders = db.execute("""
+        SELECT id, user_id, product, price,
+               player_id, status, created_at
+        FROM orders
+        ORDER BY id DESC
+        LIMIT 8 OFFSET ?
+    """, (page * 8,)).fetchall()
+
+    text = (
+        "📋 سجل طلبات ZADX\n\n"
+        f"📦 مجموع الطلبات: {total}\n"
+        f"⏳ قيد المراجعة: {pending}\n"
+        f"✅ مكتملة: {completed}\n"
+        f"❌ ملغاة: {refunded}\n\n"
+    )
+
+    if not orders:
+        text += "لا توجد طلبات في هذه الصفحة."
+
+    else:
+        for order in orders:
+
+            oid, user, product, price, player, status, created = order
+
+            status_text = {
+                "pending": "⏳ قيد المراجعة",
+                "completed": "✅ مكتمل",
+                "refunded": "❌ ملغى ومسترجع"
+            }.get(status, status)
+
+            text += (
+                "━━━━━━━━━━━━\n"
+                f"📦 الطلب: #{oid}\n"
+                f"👤 المستخدم: {user}\n"
+                f"💎 الباقة: {product}\n"
+                f"🆔 Player ID: {player}\n"
+                f"🪙 السعر: {price} نقطة\n"
+                f"📌 الحالة: {status_text}\n\n"
+            )
+
+    buttons_list = []
+    navigation = []
+
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "⬅️ السابق",
+                callback_data=f"admin_orders:{page-1}"
+            )
+        )
+
+    if (page + 1) * 8 < total:
+        navigation.append(
+            InlineKeyboardButton(
+                "التالي ➡️",
+                callback_data=f"admin_orders:{page+1}"
+            )
+        )
+
+    if navigation:
+        buttons_list.append(navigation)
+
+    buttons_list.append([
+        InlineKeyboardButton(
+            "🔄 تحديث",
+            callback_data=f"admin_orders:{page}"
+        )
+    ])
+
+    buttons_list.append([
+        InlineKeyboardButton(
+            "🔙 لوحة الإدارة",
+            callback_data="admin"
+        )
+    ])
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(buttons_list)
+    )
+
+
+# =========================
 # CALLBACK BUTTONS
 # =========================
 
@@ -305,7 +426,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # SELECT FREE FIRE PACK
     elif action.startswith("ff:"):
 
-        pid = int(action.split(":")[1])
+        try:
+            pid = int(action.split(":")[1])
+        except ValueError:
+            return
 
         if pid not in FF_PACKS:
             return
@@ -355,7 +479,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # BUY OLD PRODUCTS
     elif action.startswith("buy:"):
 
-        pid = int(action.split(":")[1])
+        try:
+            pid = int(action.split(":")[1])
+        except ValueError:
+            return
 
         if pid not in PRODUCTS:
             return
@@ -402,21 +529,51 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "admin":
 
         if uid != OWNER_ID:
-            await query.answer(
-                "هذه القائمة خاصة بالمالك 👑",
-                show_alert=True
+            await query.edit_message_text(
+                "❌ هذه القائمة خاصة بالمالك."
             )
             return
 
         await query.edit_message_text(
-            "👑 لوحة المالك\n\n"
+            "👑 لوحة إدارة ZADX\n\n"
             "🪙 رصيدك: ∞\n\n"
-            "➕ إضافة نقاط:\n"
+            "اختر العملية التي تريدها:",
+            reply_markup=admin_keyboard()
+        )
+
+    # ADMIN POINTS HELP
+    elif action == "admin_points":
+
+        if uid != OWNER_ID:
+            return
+
+        await query.edit_message_text(
+            "➕ إضافة نقاط للمستخدم:\n\n"
             "/addpoints USER_ID AMOUNT\n\n"
             "مثال:\n"
             "/addpoints 123456789 100",
-            reply_markup=menu()
+            reply_markup=admin_keyboard()
         )
+
+    # ADMIN ORDERS HISTORY
+    elif action == "admin_orders" or action.startswith("admin_orders:"):
+
+        if uid != OWNER_ID:
+            await query.answer(
+                "هذه القائمة خاصة بالمالك!",
+                show_alert=True
+            )
+            return
+
+        page = 0
+
+        if ":" in action:
+            try:
+                page = max(0, int(action.split(":")[1]))
+            except ValueError:
+                page = 0
+
+        await show_admin_orders(query, page)
 
     # ADMIN ORDER ACTIONS
     elif action.startswith("order:"):
@@ -479,13 +636,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             db.execute("BEGIN")
 
-            db.execute(
+            result = db.execute(
                 "UPDATE orders SET status='refunded' "
                 "WHERE id=? AND status='pending'",
                 (order_id,)
             )
 
-            if user_id != OWNER_ID:
+            if result.rowcount == 1 and user_id != OWNER_ID:
                 db.execute(
                     "UPDATE users SET points=points+? WHERE id=?",
                     (price, user_id)
@@ -493,17 +650,18 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             db.commit()
 
-            await context.bot.send_message(
-                user_id,
-                "❌ تم إلغاء طلبك.\n\n"
-                f"💎 الباقة: {product}\n"
-                f"🪙 تمت إعادة {price} نقطة إلى رصيدك.\n"
-                f"📦 رقم الطلب: #{order_id}"
-            )
+            if result.rowcount == 1:
+                await context.bot.send_message(
+                    user_id,
+                    "❌ تم إلغاء طلبك.\n\n"
+                    f"💎 الباقة: {product}\n"
+                    f"🪙 تمت إعادة {price} نقطة إلى رصيدك.\n"
+                    f"📦 رقم الطلب: #{order_id}"
+                )
 
-            await query.edit_message_text(
-                f"↩️ تم إلغاء الطلب #{order_id} وإرجاع النقاط."
-            )
+                await query.edit_message_text(
+                    f"↩️ تم إلغاء الطلب #{order_id} وإرجاع النقاط."
+                )
 
     # HOME
     elif action == "home":
@@ -548,7 +706,6 @@ async def handle_player_id(
 
     register(uid)
 
-    # Atomic points deduction and order creation
     try:
         db.execute("BEGIN IMMEDIATE")
 
@@ -610,7 +767,6 @@ async def handle_player_id(
         reply_markup=menu()
     )
 
-    # Notify owner
     if OWNER_ID:
 
         keyboard = InlineKeyboardMarkup([
@@ -642,7 +798,9 @@ async def handle_player_id(
             )
 
         except Exception:
-            print(f"Could not notify owner about order #{order_id}")
+            print(
+                f"Could not notify owner about order #{order_id}"
+            )
 
 
 # =========================
