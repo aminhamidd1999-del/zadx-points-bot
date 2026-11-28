@@ -1,25 +1,23 @@
+# -*- coding: utf-8 -*-
 import os
 import sqlite3
 from datetime import date, datetime, timezone
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
-    filters
+    filters,
 )
 
 TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 db = sqlite3.connect("zadx.db", check_same_thread=False)
+db.execute("PRAGMA foreign_keys = ON")
 
 # =========================
 # DATABASE
@@ -46,12 +44,11 @@ CREATE TABLE IF NOT EXISTS orders (
     user_id INTEGER NOT NULL,
     product TEXT NOT NULL,
     price INTEGER NOT NULL,
-    player_id TEXT NOT NULL,
+    player_id TEXT NOT NULL DEFAULT 'غير مطلوب',
     status TEXT DEFAULT 'pending',
     created_at TEXT
 )
 """)
-
 db.commit()
 
 # =========================
@@ -59,73 +56,75 @@ db.commit()
 # =========================
 
 PRODUCTS = {
-    1: ("ØªØµÙÙÙ ÙÙØ´ÙØ±", 100),
-    2: ("ØªØµÙÙÙ Ø´Ø¹Ø§Ø±", 250),
-    3: ("Ø®Ø¯ÙØ© ØªØ±ÙÙØ¬ Ø­ÙÙÙÙØ©", 500),
+    1: ("تصميم منشور", 100),
+    2: ("تصميم شعار", 250),
+    3: ("خدمة ترويج حقيقية", 500),
 }
 
 FF_PACKS = {
-    1: ("100 Ø¬ÙÙØ±Ø©", 1000),
-    2: ("310 Ø¬ÙÙØ±Ø©", 2500),
-    3: ("520 Ø¬ÙÙØ±Ø©", 4000),
-    4: ("1060 Ø¬ÙÙØ±Ø©", 8000),
+    1: ("100 جوهرة", 1000),
+    2: ("310 جوهرة", 2500),
+    3: ("520 جوهرة", 4000),
+    4: ("1060 جوهرة", 8000),
 }
 
 # =========================
 # HELPERS
 # =========================
 
-def register(user_id):
+def register(user_id: int):
     db.execute(
         "INSERT OR IGNORE INTO users (id, points) VALUES (?, 0)",
-        (user_id,)
+        (user_id,),
     )
     db.commit()
 
 
-def balance(user_id):
+def balance(user_id: int):
     if user_id == OWNER_ID:
-        return "â"
+        return "∞"
 
     row = db.execute(
         "SELECT points FROM users WHERE id=?",
-        (user_id,)
+        (user_id,),
     ).fetchone()
-
     return row[0] if row else 0
 
 
 def menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("ðª Ø±ØµÙØ¯Ù", callback_data="balance")],
-        [InlineKeyboardButton("ð Ø§ÙÙÙØ§ÙØ£Ø© Ø§ÙÙÙÙÙØ©", callback_data="daily")],
-        [InlineKeyboardButton("ð¥ Ø¯Ø¹ÙØ© Ø§ÙØ£ØµØ¯ÙØ§Ø¡", callback_data="invite")],
-        [InlineKeyboardButton("ðï¸ Ø§ÙÙØªØ¬Ø±", callback_data="shop")],
-        [InlineKeyboardButton("ð Ø§ÙØ¥Ø¯Ø§Ø±Ø©", callback_data="admin")]
+        [InlineKeyboardButton("🪙 رصيدي", callback_data="balance")],
+        [InlineKeyboardButton("🎁 المكافأة اليومية", callback_data="daily")],
+        [InlineKeyboardButton("👥 دعوة الأصدقاء", callback_data="invite")],
+        [InlineKeyboardButton("🛍️ المتجر", callback_data="shop")],
+        [InlineKeyboardButton("👑 الإدارة", callback_data="admin")],
     ])
 
 
 def home_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("ð  Ø§ÙØ±Ø¦ÙØ³ÙØ©", callback_data="home")]
+        [InlineKeyboardButton("🏠 الرئيسية", callback_data="home")]
     ])
 
 
 def admin_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "ð Ø³Ø¬Ù Ø¬ÙÙØ¹ Ø§ÙØ·ÙØ¨Ø§Øª",
-            callback_data="admin_orders"
-        )],
-        [InlineKeyboardButton(
-            "â Ø·Ø±ÙÙØ© Ø¥Ø¶Ø§ÙØ© Ø§ÙÙÙØ§Ø·",
-            callback_data="admin_points"
-        )],
-        [InlineKeyboardButton(
-            "ð  Ø§ÙØ±Ø¦ÙØ³ÙØ©",
-            callback_data="home"
-        )]
+        [InlineKeyboardButton("📋 سجل جميع الطلبات", callback_data="admin_orders")],
+        [InlineKeyboardButton("➕ طريقة إضافة النقاط", callback_data="admin_points")],
+        [InlineKeyboardButton("🏠 الرئيسية", callback_data="home")],
     ])
+
+
+async def notify_owner(context, message, reply_markup=None):
+    if OWNER_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=message,
+                reply_markup=reply_markup,
+            )
+        except Exception as exc:
+            print(f"تعذر إرسال إشعار للمالك: {exc}")
 
 
 # =========================
@@ -139,38 +138,40 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         try:
             inviter = int(context.args[0])
-
             if inviter != uid:
                 exists = db.execute(
                     "SELECT invited FROM referrals WHERE invited=?",
-                    (uid,)
+                    (uid,),
                 ).fetchone()
 
                 if not exists:
                     register(inviter)
-
                     db.execute(
-                        "INSERT INTO referrals VALUES (?, ?)",
-                        (uid, inviter)
+                        "INSERT INTO referrals (invited, inviter) VALUES (?, ?)",
+                        (uid, inviter),
                     )
-
                     db.execute(
                         "UPDATE users SET points=points+20 WHERE id=?",
-                        (inviter,)
+                        (inviter,),
                     )
-
                     db.commit()
-
+                    try:
+                        await context.bot.send_message(
+                            inviter,
+                            "🎉 دخل صديق جديد عن طريق رابط دعوتك! تحصلت على 20 نقطة.",
+                        )
+                    except Exception:
+                        pass
         except ValueError:
             pass
 
     context.user_data.pop("waiting_player_id", None)
 
     await update.message.reply_text(
-        "ð ÙØ±Ø­Ø¨Ø§Ù Ø¨Ù ÙÙ ZADX POINTS STORE\n\n"
-        f"ðª Ø±ØµÙØ¯Ù: {balance(uid)} ÙÙØ·Ø©\n\n"
-        "Ø§Ø®ØªØ± ÙÙ Ø§ÙÙØ§Ø¦ÙØ©:",
-        reply_markup=menu()
+        "👑 مرحباً بك في ZADX POINTS STORE\n\n"
+        f"🪙 رصيدك: {balance(uid)} نقطة\n\n"
+        "اختر من القائمة:",
+        reply_markup=menu(),
     )
 
 
@@ -184,28 +185,21 @@ async def show_shop(query):
     for pid, (name, price) in PRODUCTS.items():
         keyboard.append([
             InlineKeyboardButton(
-                f"{name} â {price} ÙÙØ·Ø©",
-                callback_data=f"buy:{pid}"
+                f"{name} — {price} نقطة",
+                callback_data=f"buy:{pid}",
             )
         ])
 
     keyboard.append([
-        InlineKeyboardButton(
-            "ð Ø´Ø­Ù Free Fire",
-            callback_data="ff_shop"
-        )
+        InlineKeyboardButton("💎 شحن Free Fire", callback_data="ff_shop")
     ])
-
     keyboard.append([
-        InlineKeyboardButton(
-            "ð Ø§ÙØ±Ø¦ÙØ³ÙØ©",
-            callback_data="home"
-        )
+        InlineKeyboardButton("🔙 الرئيسية", callback_data="home")
     ])
 
     await query.edit_message_text(
-        "ðï¸ ÙØªØ¬Ø± ZADX\n\nØ§Ø®ØªØ± Ø§ÙØ®Ø¯ÙØ© Ø§ÙØªÙ ØªØ±ÙØ¯ÙØ§:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "🛍️ متجر ZADX\n\nاختر الخدمة التي تريدها:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -215,22 +209,18 @@ async def show_ff_shop(query):
     for pid, (name, price) in FF_PACKS.items():
         keyboard.append([
             InlineKeyboardButton(
-                f"ð {name} â {price} ÙÙØ·Ø©",
-                callback_data=f"ff:{pid}"
+                f"💎 {name} — {price} نقطة",
+                callback_data=f"ff:{pid}",
             )
         ])
 
     keyboard.append([
-        InlineKeyboardButton(
-            "ð Ø±Ø¬ÙØ¹",
-            callback_data="shop"
-        )
+        InlineKeyboardButton("🔙 رجوع", callback_data="shop")
     ])
 
     await query.edit_message_text(
-        "ð ÙØªØ¬Ø± Ø´Ø­Ù Free Fire\n\n"
-        "Ø§Ø®ØªØ± Ø¨Ø§ÙØ© Ø§ÙØ¬ÙØ§ÙØ±:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "💎 متجر شحن Free Fire\n\nاختر باقة الجواهر:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -239,9 +229,7 @@ async def show_ff_shop(query):
 # =========================
 
 async def show_admin_orders(query, page=0):
-    total = db.execute(
-        "SELECT COUNT(*) FROM orders"
-    ).fetchone()[0]
+    total = db.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
 
     counts = db.execute("""
         SELECT status, COUNT(*)
@@ -262,68 +250,52 @@ async def show_admin_orders(query, page=0):
     """, (page * 8,)).fetchall()
 
     text = (
-        "ð Ø³Ø¬Ù Ø·ÙØ¨Ø§Øª ZADX\n\n"
-        f"ð¦ ÙØ¬ÙÙØ¹ Ø§ÙØ·ÙØ¨Ø§Øª: {total}\n"
-        f"â³ ÙÙØ¯ Ø§ÙÙØ±Ø§Ø¬Ø¹Ø©: {pending}\n"
-        f"â ÙÙØªÙÙØ©: {completed}\n"
-        f"â ÙÙØºØ§Ø©: {refunded}\n\n"
-        "ð Ø§Ø¶ØºØ· Ø¹ÙÙ Ø£Ù Ø·ÙØ¨ ÙØ¹Ø±Ø¶ ØªÙØ§ØµÙÙÙ:"
+        "📋 سجل طلبات ZADX\n\n"
+        f"📦 مجموع الطلبات: {total}\n"
+        f"⏳ قيد المراجعة: {pending}\n"
+        f"✅ مكتملة: {completed}\n"
+        f"❌ ملغاة: {refunded}\n\n"
+        "👇 اضغط على أي طلب لعرض تفاصيله:"
     )
 
     keyboard = []
 
     for order_id, product, status in orders:
         status_icon = {
-            "pending": "â³",
-            "completed": "â",
-            "refunded": "â"
-        }.get(status, "â")
+            "pending": "⏳",
+            "completed": "✅",
+            "refunded": "❌",
+        }.get(status, "❔")
 
         keyboard.append([
             InlineKeyboardButton(
-                f"{status_icon} Ø§ÙØ·ÙØ¨ #{order_id} - {product}",
-                callback_data=f"order_view:{order_id}:{page}"
+                f"{status_icon} الطلب #{order_id} - {product}",
+                callback_data=f"order_view:{order_id}:{page}",
             )
         ])
 
     navigation = []
-
     if page > 0:
         navigation.append(
-            InlineKeyboardButton(
-                "â¬ï¸ Ø§ÙØ³Ø§Ø¨Ù",
-                callback_data=f"admin_orders:{page-1}"
-            )
+            InlineKeyboardButton("⬅️ السابق", callback_data=f"admin_orders:{page-1}")
         )
-
     if (page + 1) * 8 < total:
         navigation.append(
-            InlineKeyboardButton(
-                "Ø§ÙØªØ§ÙÙ â¡ï¸",
-                callback_data=f"admin_orders:{page+1}"
-            )
+            InlineKeyboardButton("التالي ➡️", callback_data=f"admin_orders:{page+1}")
         )
-
     if navigation:
         keyboard.append(navigation)
 
     keyboard.append([
-        InlineKeyboardButton(
-            "ð ØªØ­Ø¯ÙØ«",
-            callback_data=f"admin_orders:{page}"
-        )
+        InlineKeyboardButton("🔄 تحديث", callback_data=f"admin_orders:{page}")
     ])
-
     keyboard.append([
-        InlineKeyboardButton(
-            "ð ÙÙØ­Ø© Ø§ÙØ¥Ø¯Ø§Ø±Ø©",
-            callback_data="admin"
-        )
+        InlineKeyboardButton("🔙 لوحة الإدارة", callback_data="admin")
     ])
 
     await query.edit_message_text(
         text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -337,57 +309,56 @@ async def show_admin_order_details(query, order_id, page=0):
 
     if not order:
         await query.edit_message_text(
-            "â Ø§ÙØ·ÙØ¨ ØºÙØ± ÙÙØ¬ÙØ¯.",
-            reply_markup=admin_keyboard()
+            "❌ الطلب غير موجود.",
+            reply_markup=admin_keyboard(),
         )
         return
 
     oid, user, product, price, player, status, created = order
 
     status_text = {
-        "pending": "â³ ÙÙØ¯ Ø§ÙÙØ±Ø§Ø¬Ø¹Ø©",
-        "completed": "â ÙÙØªÙÙ",
-        "refunded": "â ÙÙØºÙ ÙÙØ³ØªØ±Ø¬Ø¹"
+        "pending": "⏳ قيد المراجعة",
+        "completed": "✅ مكتمل",
+        "refunded": "❌ ملغى وتم إرجاع النقاط",
     }.get(status, status)
 
     text = (
-        f"ð¦ ØªÙØ§ØµÙÙ Ø§ÙØ·ÙØ¨ #{oid}\n\n"
-        "ââââââââââââ\n"
-        f"ð¤ Ø§ÙÙØ³ØªØ®Ø¯Ù: {user}\n"
-        f"ð Ø§ÙØ¨Ø§ÙØ©: {product}\n"
-        f"ð Player ID: {player}\n"
-        f"ðª Ø§ÙØ³Ø¹Ø±: {price} ÙÙØ·Ø©\n"
-        f"ð Ø§ÙØ­Ø§ÙØ©: {status_text}\n"
-        f"ð Ø§ÙØªØ§Ø±ÙØ®: {created or 'ØºÙØ± ÙØªÙÙØ±'}\n"
-        "ââââââââââââ"
+        f"📦 تفاصيل الطلب #{oid}\n\n"
+        "━━━━━━━━━━━━━━\n"
+        f"👤 المستخدم: {user}\n"
+        f"🛍️ الخدمة/الباقة: {product}\n"
+        f"🆔 Player ID: {player}\n"
+        f"🪙 السعر: {price} نقطة\n"
+        f"📌 الحالة: {status_text}\n"
+        f"📅 التاريخ: {created or 'غير متوفر'}\n"
+        "━━━━━━━━━━━━━━"
     )
 
     keyboard = []
-
     if status == "pending":
         keyboard.append([
             InlineKeyboardButton(
-                "â ØªØ£ÙÙØ¯ Ø¥ØªÙØ§Ù Ø§ÙØ´Ø­Ù",
-                callback_data=f"order:approve:{oid}"
+                "✅ تأكيد إتمام الطلب",
+                callback_data=f"order:approve:{oid}",
             )
         ])
         keyboard.append([
             InlineKeyboardButton(
-                "â Ø±ÙØ¶ ÙØ¥Ø±Ø¬Ø§Ø¹ Ø§ÙÙÙØ§Ø·",
-                callback_data=f"order:reject:{oid}"
+                "❌ رفض وإرجاع النقاط",
+                callback_data=f"order:reject:{oid}",
             )
         ])
 
     keyboard.append([
         InlineKeyboardButton(
-            "ð Ø±Ø¬ÙØ¹ Ø¥ÙÙ Ø³Ø¬Ù Ø§ÙØ·ÙØ¨Ø§Øª",
-            callback_data=f"admin_orders:{page}"
+            "🔙 الرجوع إلى سجل الطلبات",
+            callback_data=f"admin_orders:{page}",
         )
     ])
 
     await query.edit_message_text(
         text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -401,39 +372,36 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     uid = query.from_user.id
     register(uid)
-
     action = query.data
 
     if action == "balance":
         await query.edit_message_text(
-            f"ðª Ø±ØµÙØ¯Ù: {balance(uid)} ÙÙØ·Ø©",
-            reply_markup=menu()
+            f"🪙 رصيدك: {balance(uid)} نقطة",
+            reply_markup=menu(),
         )
 
     elif action == "daily":
         today = str(date.today())
-
         row = db.execute(
             "SELECT last_daily FROM users WHERE id=?",
-            (uid,)
+            (uid,),
         ).fetchone()
 
-        if row[0] == today:
-            msg = "â³ ÙÙØ¯ Ø£Ø®Ø°Øª ÙÙØ§ÙØ£ØªÙ Ø§ÙÙÙÙ. Ø¹ÙØ¯ ØºØ¯Ø§Ù!"
+        if row and row[0] == today:
+            msg = "⏳ لقد أخذت مكافأتك اليوم. عُد غداً!"
         else:
             if uid != OWNER_ID:
                 db.execute(
                     "UPDATE users SET points=points+10, last_daily=? WHERE id=?",
-                    (today, uid)
+                    (today, uid),
                 )
             else:
                 db.execute(
                     "UPDATE users SET last_daily=? WHERE id=?",
-                    (today, uid)
+                    (today, uid),
                 )
-
             db.commit()
-            msg = "ð Ø­ØµÙØª Ø¹ÙÙ 10 ÙÙØ§Ø·!"
+            msg = "🎉 تحصلت على 10 نقاط!"
 
         await query.edit_message_text(msg, reply_markup=menu())
 
@@ -442,10 +410,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         link = f"https://t.me/{me.username}?start={uid}"
 
         await query.edit_message_text(
-            "ð¥ Ø§Ø¯Ø¹Ù Ø£ØµØ¯ÙØ§Ø¡Ù Ø¥ÙÙ Ø§ÙØ¨ÙØª!\n\n"
-            "ð ØªØ­ØµÙ Ø¹ÙÙ 20 ÙÙØ·Ø© Ø¹Ù ÙÙ ØµØ¯ÙÙ Ø¬Ø¯ÙØ¯.\n\n"
-            f"Ø±Ø§Ø¨Ø· Ø¯Ø¹ÙØªÙ:\n{link}",
-            reply_markup=menu()
+            "👥 ادعُ أصدقاءك إلى البوت!\n\n"
+            "🎁 تحصل على 20 نقطة عن كل صديق جديد.\n\n"
+            f"رابط دعوتك:\n{link}",
+            reply_markup=menu(),
         )
 
     elif action == "shop":
@@ -468,35 +436,35 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if uid != OWNER_ID and balance(uid) < price:
             await query.edit_message_text(
-                "â ÙÙØ§Ø·Ù ØºÙØ± ÙØ§ÙÙØ©!\n\n"
-                f"Ø³Ø¹Ø± Ø§ÙØ¨Ø§ÙØ©: {price} ÙÙØ·Ø©\n"
-                f"Ø±ØµÙØ¯Ù: {balance(uid)} ÙÙØ·Ø©",
-                reply_markup=home_keyboard()
+                "❌ نقاطك غير كافية!\n\n"
+                f"سعر الباقة: {price} نقطة\n"
+                f"رصيدك: {balance(uid)} نقطة",
+                reply_markup=home_keyboard(),
             )
             return
 
         context.user_data["waiting_player_id"] = {
             "pack_id": pid,
             "name": name,
-            "price": price
+            "price": price,
         }
 
         await query.edit_message_text(
-            "ð Ø·ÙØ¨ Ø´Ø­Ù Free Fire\n\n"
-            f"Ø§ÙØ¨Ø§ÙØ©: {name}\n"
-            f"Ø§ÙØ³Ø¹Ø±: {price} ÙÙØ·Ø©\n\n"
-            "ð Ø£Ø±Ø³Ù Player ID Ø§ÙØ®Ø§Øµ Ø¨Ø­Ø³Ø§Ø¨Ù Ø§ÙØ¢Ù.\n\n"
-            "â ï¸ ØªØ£ÙØ¯ ÙÙ ØµØ­Ø© Ø§ÙØ±ÙÙ ÙØ¨Ù Ø§ÙØ¥Ø±Ø³Ø§Ù.",
+            "💎 طلب شحن Free Fire\n\n"
+            f"الباقة: {name}\n"
+            f"السعر: {price} نقطة\n\n"
+            "🆔 أرسل Player ID الخاص بحسابك الآن.\n\n"
+            "⚠️ تأكد من صحة الرقم قبل الإرسال.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("â Ø¥ÙØºØ§Ø¡", callback_data="cancel_ff")]
-            ])
+                [InlineKeyboardButton("❌ إلغاء", callback_data="cancel_ff")]
+            ]),
         )
 
     elif action == "cancel_ff":
         context.user_data.pop("waiting_player_id", None)
         await query.edit_message_text(
-            "â ØªÙ Ø¥ÙØºØ§Ø¡ Ø§ÙØ¹ÙÙÙØ©.",
-            reply_markup=menu()
+            "❌ تم إلغاء العملية.",
+            reply_markup=menu(),
         )
 
     elif action.startswith("buy:"):
@@ -510,53 +478,90 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         name, price = PRODUCTS[pid]
 
-        if uid != OWNER_ID:
-            row = db.execute(
-                "SELECT points FROM users WHERE id=?",
-                (uid,)
-            ).fetchone()
+        try:
+            db.execute("BEGIN IMMEDIATE")
 
-            if row[0] < price:
-                await query.edit_message_text(
-                    "â ÙÙØ§Ø·Ù ØºÙØ± ÙØ§ÙÙØ©!",
-                    reply_markup=menu()
+            if uid != OWNER_ID:
+                result = db.execute(
+                    "UPDATE users SET points=points-? WHERE id=? AND points>=?",
+                    (price, uid, price),
                 )
-                return
+                if result.rowcount != 1:
+                    db.rollback()
+                    await query.edit_message_text(
+                        "❌ نقاطك غير كافية لشراء هذه الخدمة.",
+                        reply_markup=home_keyboard(),
+                    )
+                    return
 
-            db.execute(
-                "UPDATE users SET points=points-? WHERE id=?",
-                (price, uid)
+            # حفظ الخدمات العادية في سجل الطلبات أيضاً
+            cursor = db.execute(
+                """
+                INSERT INTO orders
+                (user_id, product, price, player_id, status, created_at)
+                VALUES (?, ?, ?, ?, 'pending', ?)
+                """,
+                (
+                    uid,
+                    name,
+                    price,
+                    "غير مطلوب",
+                    datetime.now(timezone.utc).isoformat(),
+                ),
             )
+            order_id = cursor.lastrowid
             db.commit()
 
-        await query.edit_message_text(
-            f"â ØªÙ ØªØ³Ø¬ÙÙ Ø·ÙØ¨Ù!\n\n"
-            f"Ø§ÙØ®Ø¯ÙØ©: {name}\n"
-            f"Ø§ÙØ³Ø¹Ø±: {price} ÙÙØ·Ø©\n"
-            "ØªÙØ§ØµÙ ÙØ¹ Ø§ÙØ¥Ø¯Ø§Ø±Ø© ÙØ¥ØªÙØ§Ù Ø§ÙØ®Ø¯ÙØ©.",
-            reply_markup=menu()
-        )
-
-        if OWNER_ID:
-            await context.bot.send_message(
-                OWNER_ID,
-                f"ð¦ Ø·ÙØ¨ Ø¬Ø¯ÙØ¯!\n"
-                f"Ø§ÙÙØ³ØªØ®Ø¯Ù: {uid}\n"
-                f"Ø§ÙØ®Ø¯ÙØ©: {name}"
-            )
-
-    elif action == "admin":
-        if uid != OWNER_ID:
+        except Exception as exc:
+            db.rollback()
+            print(f"خطأ في تسجيل طلب الخدمة: {exc}")
             await query.edit_message_text(
-                "â ÙØ°Ù Ø§ÙÙØ§Ø¦ÙØ© Ø®Ø§ØµØ© Ø¨Ø§ÙÙØ§ÙÙ."
+                "❌ حدث خطأ أثناء تسجيل الطلب. حاول مرة أخرى.",
+                reply_markup=menu(),
             )
             return
 
         await query.edit_message_text(
-            "ð ÙÙØ­Ø© Ø¥Ø¯Ø§Ø±Ø© ZADX\n\n"
-            "ðª Ø±ØµÙØ¯Ù: â\n\n"
-            "Ø§Ø®ØªØ± Ø§ÙØ¹ÙÙÙØ© Ø§ÙØªÙ ØªØ±ÙØ¯ÙØ§:",
-            reply_markup=admin_keyboard()
+            "✅ تم تسجيل طلبك بنجاح!\n\n"
+            f"📦 رقم الطلب: #{order_id}\n"
+            f"الخدمة: {name}\n"
+            f"السعر: {price} نقطة\n\n"
+            "⏳ طلبك قيد المراجعة من الإدارة.",
+            reply_markup=menu(),
+        )
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "✅ تأكيد إتمام الطلب",
+                callback_data=f"order:approve:{order_id}",
+            )],
+            [InlineKeyboardButton(
+                "❌ رفض وإرجاع النقاط",
+                callback_data=f"order:reject:{order_id}",
+            )],
+        ])
+
+        await notify_owner(
+            context,
+            "📦 طلب خدمة جديد!\n\n"
+            f"رقم الطلب: #{order_id}\n"
+            f"المستخدم: {uid}\n"
+            f"الخدمة: {name}\n"
+            f"السعر: {price} نقطة\n"
+            "الحالة: قيد المراجعة",
+            keyboard,
+        )
+
+    elif action == "admin":
+        if uid != OWNER_ID:
+            await query.edit_message_text("❌ هذه القائمة خاصة بالمالك.")
+            return
+
+        await query.edit_message_text(
+            "👑 لوحة إدارة ZADX\n\n"
+            "🪙 رصيدك: ∞\n\n"
+            "اختر العملية التي تريدها:",
+            reply_markup=admin_keyboard(),
         )
 
     elif action == "admin_points":
@@ -564,18 +569,15 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         await query.edit_message_text(
-            "â Ø¥Ø¶Ø§ÙØ© ÙÙØ§Ø· ÙÙÙØ³ØªØ®Ø¯Ù:\n\n"
+            "➕ إضافة نقاط للمستخدم:\n\n"
             "/addpoints USER_ID AMOUNT\n\n"
-            "ÙØ«Ø§Ù:\n/addpoints 123456789 100",
-            reply_markup=admin_keyboard()
+            "مثال:\n/addpoints 123456789 100",
+            reply_markup=admin_keyboard(),
         )
 
     elif action == "admin_orders" or action.startswith("admin_orders:"):
         if uid != OWNER_ID:
-            await query.answer(
-                "ÙØ°Ù Ø§ÙÙØ§Ø¦ÙØ© Ø®Ø§ØµØ© Ø¨Ø§ÙÙØ§ÙÙ!",
-                show_alert=True
-            )
+            await query.edit_message_text("❌ سجل الطلبات خاص بالمالك.")
             return
 
         page = 0
@@ -589,10 +591,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action.startswith("order_view:"):
         if uid != OWNER_ID:
-            await query.answer(
-                "ÙØ°Ù Ø§ÙØ¹ÙÙÙØ© Ø®Ø§ØµØ© Ø¨Ø§ÙØ¥Ø¯Ø§Ø±Ø©!",
-                show_alert=True
-            )
+            await query.edit_message_text("❌ هذه العملية خاصة بالإدارة.")
             return
 
         try:
@@ -601,16 +600,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             page = int(parts[2])
             await show_admin_order_details(query, order_id, page)
         except (ValueError, IndexError):
-            await query.edit_message_text(
-                "â Ø­Ø¯Ø« Ø®Ø·Ø£ ÙÙ Ø±ÙÙ Ø§ÙØ·ÙØ¨."
-            )
+            await query.edit_message_text("❌ حدث خطأ في رقم الطلب.")
 
     elif action.startswith("order:"):
         if uid != OWNER_ID:
-            await query.answer(
-                "ÙØ°Ù Ø§ÙØ¹ÙÙÙØ© Ø®Ø§ØµØ© Ø¨Ø§ÙØ¥Ø¯Ø§Ø±Ø©!",
-                show_alert=True
-            )
+            await query.edit_message_text("❌ هذه العملية خاصة بالإدارة.")
             return
 
         parts = action.split(":")
@@ -618,7 +612,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         operation = parts[1]
-
         try:
             order_id = int(parts[2])
         except ValueError:
@@ -627,13 +620,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = db.execute(
             "SELECT user_id, product, price, player_id, status "
             "FROM orders WHERE id=?",
-            (order_id,)
+            (order_id,),
         ).fetchone()
 
         if not order or order[4] != "pending":
             await query.edit_message_text(
-                "â ï¸ ÙØ°Ø§ Ø§ÙØ·ÙØ¨ ØªÙØª ÙØ¹Ø§ÙØ¬ØªÙ ÙÙ ÙØ¨Ù.",
-                reply_markup=admin_keyboard()
+                "⚠️ هذا الطلب تمت معالجته من قبل.",
+                reply_markup=admin_keyboard(),
             )
             return
 
@@ -643,61 +636,70 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result = db.execute(
                 "UPDATE orders SET status='completed' "
                 "WHERE id=? AND status='pending'",
-                (order_id,)
+                (order_id,),
             )
             db.commit()
 
             if result.rowcount == 1:
-                await context.bot.send_message(
-                    user_id,
-                    "â ØªÙ ØªØ£ÙÙØ¯ Ø¥ØªÙØ§Ù Ø·ÙØ¨Ù!\n\n"
-                    f"ð Ø§ÙØ¨Ø§ÙØ©: {product}\n"
-                    f"ð Player ID: {player_id}\n"
-                    f"ð¦ Ø±ÙÙ Ø§ÙØ·ÙØ¨: #{order_id}"
-                )
+                try:
+                    await context.bot.send_message(
+                        user_id,
+                        "✅ تم تأكيد إتمام طلبك!\n\n"
+                        f"📦 الخدمة/الباقة: {product}\n"
+                        f"🆔 Player ID: {player_id}\n"
+                        f"رقم الطلب: #{order_id}",
+                    )
+                except Exception as exc:
+                    print(f"تعذر إرسال إشعار للمستخدم: {exc}")
 
                 await query.edit_message_text(
-                    f"â ØªÙ ØªØ£ÙÙØ¯ Ø§ÙØ·ÙØ¨ #{order_id}.",
-                    reply_markup=admin_keyboard()
+                    f"✅ تم تأكيد الطلب #{order_id}.",
+                    reply_markup=admin_keyboard(),
                 )
 
         elif operation == "reject":
-            db.execute("BEGIN IMMEDIATE")
-
-            result = db.execute(
-                "UPDATE orders SET status='refunded' "
-                "WHERE id=? AND status='pending'",
-                (order_id,)
-            )
-
-            if result.rowcount == 1 and user_id != OWNER_ID:
-                db.execute(
-                    "UPDATE users SET points=points+? WHERE id=?",
-                    (price, user_id)
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                result = db.execute(
+                    "UPDATE orders SET status='refunded' "
+                    "WHERE id=? AND status='pending'",
+                    (order_id,),
                 )
 
-            db.commit()
+                if result.rowcount == 1 and user_id != OWNER_ID:
+                    db.execute(
+                        "UPDATE users SET points=points+? WHERE id=?",
+                        (price, user_id),
+                    )
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                print(f"خطأ في إرجاع النقاط: {exc}")
+                await query.edit_message_text("❌ حدث خطأ أثناء إلغاء الطلب.")
+                return
 
             if result.rowcount == 1:
-                await context.bot.send_message(
-                    user_id,
-                    "â ØªÙ Ø¥ÙØºØ§Ø¡ Ø·ÙØ¨Ù.\n\n"
-                    f"ð Ø§ÙØ¨Ø§ÙØ©: {product}\n"
-                    f"ðª ØªÙØª Ø¥Ø¹Ø§Ø¯Ø© {price} ÙÙØ·Ø© Ø¥ÙÙ Ø±ØµÙØ¯Ù.\n"
-                    f"ð¦ Ø±ÙÙ Ø§ÙØ·ÙØ¨: #{order_id}"
-                )
+                try:
+                    await context.bot.send_message(
+                        user_id,
+                        "❌ تم إلغاء طلبك.\n\n"
+                        f"📦 الخدمة/الباقة: {product}\n"
+                        f"🪙 تمت إعادة {price} نقطة إلى رصيدك.\n"
+                        f"رقم الطلب: #{order_id}",
+                    )
+                except Exception as exc:
+                    print(f"تعذر إرسال إشعار للمستخدم: {exc}")
 
                 await query.edit_message_text(
-                    f"â©ï¸ ØªÙ Ø¥ÙØºØ§Ø¡ Ø§ÙØ·ÙØ¨ #{order_id} ÙØ¥Ø±Ø¬Ø§Ø¹ Ø§ÙÙÙØ§Ø·.",
-                    reply_markup=admin_keyboard()
+                    f"↩️ تم إلغاء الطلب #{order_id} وإرجاع النقاط.",
+                    reply_markup=admin_keyboard(),
                 )
 
     elif action == "home":
         context.user_data.pop("waiting_player_id", None)
         await query.edit_message_text(
-            "ð ZADX POINTS STORE\n\n"
-            "Ø§Ø®ØªØ± ÙÙ Ø§ÙÙØ§Ø¦ÙØ©:",
-            reply_markup=menu()
+            "👑 ZADX POINTS STORE\n\nاختر من القائمة:",
+            reply_markup=menu(),
         )
 
 
@@ -707,7 +709,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_player_id(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
     uid = update.effective_user.id
     pending = context.user_data.get("waiting_player_id")
@@ -715,18 +717,17 @@ async def handle_player_id(
     if not pending:
         return
 
-    player_id = update.message.text.strip()
+    player_id = (update.message.text or "").strip()
 
     if not player_id.isdigit() or not (5 <= len(player_id) <= 20):
         await update.message.reply_text(
-            "â Player ID ØºÙØ± ØµØ­ÙØ­.\n"
-            "Ø£Ø±Ø³Ù Ø§ÙØ±ÙÙ ÙÙØ·Ø ÙØ­Ø§ÙÙ ÙØ±Ø© Ø£Ø®Ø±Ù."
+            "❌ Player ID غير صحيح.\n"
+            "أرسل الأرقام فقط، وحاول مرة أخرى."
         )
         return
 
     name = pending["name"]
     price = pending["price"]
-
     register(uid)
 
     try:
@@ -736,15 +737,15 @@ async def handle_player_id(
             result = db.execute(
                 "UPDATE users SET points=points-? "
                 "WHERE id=? AND points>=?",
-                (price, uid, price)
+                (price, uid, price),
             )
 
             if result.rowcount != 1:
                 db.rollback()
                 context.user_data.pop("waiting_player_id", None)
                 await update.message.reply_text(
-                    "â ÙÙØ§Ø·Ù ØºÙØ± ÙØ§ÙÙØ© Ø§ÙØ¢Ù.",
-                    reply_markup=menu()
+                    "❌ نقاطك غير كافية الآن.",
+                    reply_markup=menu(),
                 )
                 return
 
@@ -759,58 +760,54 @@ async def handle_player_id(
                 name,
                 price,
                 player_id,
-                datetime.now(timezone.utc).isoformat()
-            )
+                datetime.now(timezone.utc).isoformat(),
+            ),
         )
-
         order_id = cursor.lastrowid
         db.commit()
 
-    except Exception:
+    except Exception as exc:
         db.rollback()
+        print(f"خطأ أثناء تسجيل طلب Free Fire: {exc}")
         await update.message.reply_text(
-            "â Ø­Ø¯Ø« Ø®Ø·Ø£ Ø£Ø«ÙØ§Ø¡ ØªØ³Ø¬ÙÙ Ø§ÙØ·ÙØ¨. Ø­Ø§ÙÙ ÙØ±Ø© Ø£Ø®Ø±Ù."
+            "❌ حدث خطأ أثناء تسجيل الطلب. حاول مرة أخرى."
         )
         return
 
     context.user_data.pop("waiting_player_id", None)
 
     await update.message.reply_text(
-        "â ØªÙ ØªØ³Ø¬ÙÙ Ø·ÙØ¨Ù Ø¨ÙØ¬Ø§Ø­!\n\n"
-        f"ð Ø§ÙØ¨Ø§ÙØ©: {name}\n"
-        f"ð Player ID: {player_id}\n"
-        f"ðª Ø§ÙØ³Ø¹Ø±: {price} ÙÙØ·Ø©\n"
-        f"ð¦ Ø±ÙÙ Ø§ÙØ·ÙØ¨: #{order_id}\n\n"
-        "â³ Ø·ÙØ¨Ù ÙÙØ¯ Ø§ÙÙØ±Ø§Ø¬Ø¹Ø© ÙÙ Ø§ÙØ¥Ø¯Ø§Ø±Ø©.",
-        reply_markup=menu()
+        "✅ تم تسجيل طلبك بنجاح!\n\n"
+        f"💎 الباقة: {name}\n"
+        f"🆔 Player ID: {player_id}\n"
+        f"🪙 السعر: {price} نقطة\n"
+        f"📦 رقم الطلب: #{order_id}\n\n"
+        "⏳ طلبك قيد المراجعة من الإدارة.",
+        reply_markup=menu(),
     )
 
-    if OWNER_ID:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                "â ØªØ£ÙÙØ¯ Ø¥ØªÙØ§Ù Ø§ÙØ´Ø­Ù",
-                callback_data=f"order:approve:{order_id}"
-            )],
-            [InlineKeyboardButton(
-                "â Ø±ÙØ¶ ÙØ¥Ø±Ø¬Ø§Ø¹ Ø§ÙÙÙØ§Ø·",
-                callback_data=f"order:reject:{order_id}"
-            )]
-        ])
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "✅ تأكيد إتمام الشحن",
+            callback_data=f"order:approve:{order_id}",
+        )],
+        [InlineKeyboardButton(
+            "❌ رفض وإرجاع النقاط",
+            callback_data=f"order:reject:{order_id}",
+        )],
+    ])
 
-        try:
-            await context.bot.send_message(
-                OWNER_ID,
-                "ð¦ Ø·ÙØ¨ Free Fire Ø¬Ø¯ÙØ¯!\n\n"
-                f"Ø±ÙÙ Ø§ÙØ·ÙØ¨: #{order_id}\n"
-                f"Ø§ÙÙØ³ØªØ®Ø¯Ù: {uid}\n"
-                f"Ø§ÙØ¨Ø§ÙØ©: {name}\n"
-                f"Player ID: {player_id}\n"
-                f"Ø§ÙØ³Ø¹Ø±: {price} ÙÙØ·Ø©\n\n"
-                "Ø§ÙØ­Ø§ÙØ©: ÙÙØ¯ Ø§ÙÙØ±Ø§Ø¬Ø¹Ø©",
-                reply_markup=keyboard
-            )
-        except Exception as exc:
-            print(f"Could not notify owner about order #{order_id}: {exc}")
+    await notify_owner(
+        context,
+        "📦 طلب Free Fire جديد!\n\n"
+        f"رقم الطلب: #{order_id}\n"
+        f"المستخدم: {uid}\n"
+        f"الباقة: {name}\n"
+        f"Player ID: {player_id}\n"
+        f"السعر: {price} نقطة\n\n"
+        "الحالة: قيد المراجعة",
+        keyboard,
+    )
 
 
 # =========================
@@ -819,14 +816,15 @@ async def handle_player_id(
 
 async def addpoints(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
     if update.effective_user.id != OWNER_ID:
         return
 
     if len(context.args) != 2:
         await update.message.reply_text(
-            "Ø§Ø³ØªØ¹ÙÙ:\n/addpoints USER_ID AMOUNT"
+            "طريقة الاستعمال:\n/addpoints USER_ID AMOUNT\n\n"
+            "مثال:\n/addpoints 123456789 100"
         )
         return
 
@@ -838,21 +836,26 @@ async def addpoints(
             raise ValueError
 
         register(target)
-
         db.execute(
             "UPDATE users SET points=points+? WHERE id=?",
-            (amount, target)
+            (amount, target),
         )
         db.commit()
 
         await update.message.reply_text(
-            f"â ØªÙØª Ø¥Ø¶Ø§ÙØ© {amount} ÙÙØ·Ø© ÙÙÙØ³ØªØ®Ø¯Ù {target}"
+            f"✅ تمت إضافة {amount} نقطة للمستخدم {target}."
         )
 
+        try:
+            await context.bot.send_message(
+                target,
+                f"🎁 تمت إضافة {amount} نقطة إلى رصيدك في ZADX POINTS STORE.",
+            )
+        except Exception:
+            pass
+
     except ValueError:
-        await update.message.reply_text(
-            "â ØªØ­ÙÙ ÙÙ Ø§ÙØ£Ø±ÙØ§Ù."
-        )
+        await update.message.reply_text("❌ تحقق من الأرقام والمبلغ.")
 
 
 # =========================
@@ -861,9 +864,7 @@ async def addpoints(
 
 def main():
     if not TOKEN or not OWNER_ID:
-        raise RuntimeError(
-            "Set BOT_TOKEN and OWNER_ID first"
-        )
+        raise RuntimeError("يجب ضبط BOT_TOKEN و OWNER_ID في متغيرات البيئة.")
 
     app = Application.builder().token(TOKEN).build()
 
@@ -873,12 +874,11 @@ def main():
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            handle_player_id
+            handle_player_id,
         )
     )
 
     print("ZADX POINTS STORE is running!")
-
     app.run_polling()
 
 
