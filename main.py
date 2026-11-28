@@ -54,13 +54,26 @@ CREATE TABLE IF NOT EXISTS orders (
 )
 """)
 
-# Safe migration for existing databases
+# Safe database migrations
 columns = {
-    row[1] for row in db.execute("PRAGMA table_info(orders)").fetchall()
+    row[1] for row in db.execute(
+        "PRAGMA table_info(orders)"
+    ).fetchall()
 }
+
 if "is_test" not in columns:
     db.execute(
         "ALTER TABLE orders ADD COLUMN is_test INTEGER DEFAULT 0"
+    )
+
+if "provider_ref" not in columns:
+    db.execute(
+        "ALTER TABLE orders ADD COLUMN provider_ref TEXT"
+    )
+
+if "provider_status" not in columns:
+    db.execute(
+        "ALTER TABLE orders ADD COLUMN provider_status TEXT"
     )
 
 db.commit()
@@ -144,6 +157,33 @@ async def notify_owner(context, message, reply_markup=None):
 
 def now_utc():
     return datetime.now(timezone.utc).isoformat()
+
+
+# =========================
+# SIMULATED PROVIDER
+# =========================
+
+def simulate_provider_topup(order_id, player_id, product):
+    """
+    محاكاة محلية فقط.
+    لا يوجد اتصال بمزوّد حقيقي.
+    لا يتم شحن الجواهر أو خصم النقاط.
+    """
+
+    if not player_id.isdigit():
+        return {
+            "success": False,
+            "reference": None,
+            "status": "simulated_failed",
+        }
+
+    reference = f"SIM-ZADX-{order_id:06d}"
+
+    return {
+        "success": True,
+        "reference": reference,
+        "status": "simulated_success",
+    }
 
 
 # =========================
@@ -357,7 +397,8 @@ async def show_admin_orders(query, page=0):
 async def show_admin_order_details(query, order_id, page=0):
     order = db.execute("""
         SELECT id, user_id, product, price,
-               player_id, status, created_at, is_test
+               player_id, status, created_at, is_test,
+               provider_ref, provider_status
         FROM orders
         WHERE id=?
     """, (order_id,)).fetchone()
@@ -369,7 +410,11 @@ async def show_admin_order_details(query, order_id, page=0):
         )
         return
 
-    oid, user, product, price, player, status, created, is_test = order
+    (
+        oid, user, product, price, player,
+        status, created, is_test,
+        provider_ref, provider_status
+    ) = order
 
     status_text = {
         "pending": "⏳ قيد المراجعة",
@@ -392,6 +437,8 @@ async def show_admin_order_details(query, order_id, page=0):
         f"🪙 السعر: {price} نقطة\n"
         f"📌 الحالة: {status_text}\n"
         f"🧪 النوع: {test_text}\n"
+        f"🔖 رقم عملية المزوّد: {provider_ref or 'لم تتم المحاكاة'}\n"
+        f"🧪 نتيجة المزوّد: {provider_status or 'لم تتم بعد'}\n"
         f"📅 التاريخ: {created or 'غير متوفر'}\n"
         "━━━━━━━━━━━━━━"
     )
@@ -734,23 +781,72 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id, product, price, player_id, status, is_test = order
 
         if operation == "approve":
-            result = db.execute(
-                "UPDATE orders SET status='completed' "
-                "WHERE id=? AND status='pending'",
-                (order_id,),
-            )
+
+            provider_result = None
+
+            if is_test:
+                provider_result = simulate_provider_topup(
+                    order_id,
+                    player_id,
+                    product,
+                )
+
+                provider_ref = provider_result["reference"]
+                provider_status = provider_result["status"]
+
+                if provider_result["success"]:
+                    result = db.execute("""
+                        UPDATE orders
+                        SET status='completed',
+                            provider_ref=?,
+                            provider_status=?
+                        WHERE id=? AND status='pending'
+                    """, (
+                        provider_ref,
+                        provider_status,
+                        order_id,
+                    ))
+                else:
+                    result = db.execute("""
+                        UPDATE orders
+                        SET provider_ref=?,
+                            provider_status=?
+                        WHERE id=? AND status='pending'
+                    """, (
+                        provider_ref,
+                        provider_status,
+                        order_id,
+                    ))
+
+            else:
+                result = db.execute(
+                    "UPDATE orders SET status='completed' "
+                    "WHERE id=? AND status='pending'",
+                    (order_id,),
+                )
+
             db.commit()
 
             if result.rowcount == 1:
-                if is_test:
+
+                if is_test and provider_result["success"]:
                     user_message = (
-                        "🧪 تم قبول طلبك التجريبي!\n\n"
-                        f"📦 الباقة: {product}\n"
+                        "🧪 نجحت محاكاة المزوّد!\n\n"
+                        f"💎 الباقة: {product}\n"
                         f"🆔 Player ID: {player_id}\n"
-                        f"رقم الطلب: #{order_id}\n\n"
-                        "⚠️ هذا اختبار فقط. لم يتم شحن أي جواهر "
-                        "ولم يتم خصم أي نقاط."
+                        f"📦 رقم الطلب: #{order_id}\n"
+                        f"🔖 رقم العملية التجريبي: {provider_ref}\n\n"
+                        "✅ المزوّد التجريبي أعاد نتيجة نجاح.\n"
+                        "⚠️ لا يوجد شحن حقيقي ولم يتم خصم نقاط."
                     )
+
+                elif is_test:
+                    user_message = (
+                        "🧪 فشلت محاكاة المزوّد.\n\n"
+                        f"📦 رقم الطلب: #{order_id}\n"
+                        "⚠️ لم يتم شحن الجواهر ولم تخصم أي نقاط."
+                    )
+
                 else:
                     user_message = (
                         "✅ تم تأكيد إتمام طلبك!\n\n"
@@ -767,8 +863,18 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as exc:
                     print(f"تعذر إرسال إشعار للمستخدم: {exc}")
 
+                admin_message = f"✅ تمت معالجة الطلب #{order_id}."
+
+                if is_test:
+                    admin_message += (
+                        "\n\n🧪 نتيجة محاكاة المزوّد: "
+                        f"{provider_result['status']}"
+                        f"\n🔖 رقم العملية: {provider_ref or 'لا يوجد'}"
+                        "\n⚠️ لم يحدث شحن حقيقي."
+                    )
+
                 await query.edit_message_text(
-                    f"✅ تم تأكيد الطلب #{order_id}.",
+                    admin_message,
                     reply_markup=admin_keyboard(),
                 )
 
@@ -782,7 +888,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     (order_id,),
                 )
 
-                # Test orders never deducted points
                 if result.rowcount == 1 and user_id != OWNER_ID and not is_test:
                     db.execute(
                         "UPDATE users SET points=points+? WHERE id=?",
@@ -870,7 +975,6 @@ async def handle_player_id(
     try:
         db.execute("BEGIN IMMEDIATE")
 
-        # Only real normal orders deduct points
         if uid != OWNER_ID and not is_test:
             result = db.execute(
                 "UPDATE users SET points=points-? "
