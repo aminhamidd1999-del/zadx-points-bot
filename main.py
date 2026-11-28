@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 import os
 import sqlite3
@@ -15,6 +16,9 @@ from telegram.ext import (
 
 TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+
+# Free Fire test mode: no real top-up and no points deduction
+FF_TEST_MODE = True
 
 db = sqlite3.connect("zadx.db", check_same_thread=False)
 db.execute("PRAGMA foreign_keys = ON")
@@ -49,6 +53,16 @@ CREATE TABLE IF NOT EXISTS orders (
     created_at TEXT
 )
 """)
+
+# Safe migration for existing databases
+columns = {
+    row[1] for row in db.execute("PRAGMA table_info(orders)").fetchall()
+}
+if "is_test" not in columns:
+    db.execute(
+        "ALTER TABLE orders ADD COLUMN is_test INTEGER DEFAULT 0"
+    )
+
 db.commit()
 
 # =========================
@@ -88,6 +102,7 @@ def balance(user_id: int):
         "SELECT points FROM users WHERE id=?",
         (user_id,),
     ).fetchone()
+
     return row[0] if row else 0
 
 
@@ -127,6 +142,10 @@ async def notify_owner(context, message, reply_markup=None):
             print(f"تعذر إرسال إشعار للمالك: {exc}")
 
 
+def now_utc():
+    return datetime.now(timezone.utc).isoformat()
+
+
 # =========================
 # START
 # =========================
@@ -138,6 +157,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         try:
             inviter = int(context.args[0])
+
             if inviter != uid:
                 exists = db.execute(
                     "SELECT invited FROM referrals WHERE invited=?",
@@ -146,15 +166,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 if not exists:
                     register(inviter)
+
                     db.execute(
                         "INSERT INTO referrals (invited, inviter) VALUES (?, ?)",
                         (uid, inviter),
                     )
+
                     db.execute(
                         "UPDATE users SET points=points+20 WHERE id=?",
                         (inviter,),
                     )
                     db.commit()
+
                     try:
                         await context.bot.send_message(
                             inviter,
@@ -162,6 +185,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                     except Exception:
                         pass
+
         except ValueError:
             pass
 
@@ -191,8 +215,9 @@ async def show_shop(query):
         ])
 
     keyboard.append([
-        InlineKeyboardButton("💎 شحن Free Fire", callback_data="ff_shop")
+        InlineKeyboardButton("💎 شحن Free Fire 🧪", callback_data="ff_shop")
     ])
+
     keyboard.append([
         InlineKeyboardButton("🔙 الرئيسية", callback_data="home")
     ])
@@ -209,7 +234,7 @@ async def show_ff_shop(query):
     for pid, (name, price) in FF_PACKS.items():
         keyboard.append([
             InlineKeyboardButton(
-                f"💎 {name} — {price} نقطة",
+                f"🧪 {name} — {price} نقطة",
                 callback_data=f"ff:{pid}",
             )
         ])
@@ -219,7 +244,11 @@ async def show_ff_shop(query):
     ])
 
     await query.edit_message_text(
-        "💎 متجر شحن Free Fire\n\nاختر باقة الجواهر:",
+        "💎 متجر شحن Free Fire\n\n"
+        "🧪 وضع تجريبي فقط.\n"
+        "لا يتم شحن الجواهر ولا خصم النقاط.\n"
+        "الأسعار المعروضة تجريبية وليست أسعار مزوّد.\n\n"
+        "اختر باقة للتجربة:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -229,7 +258,9 @@ async def show_ff_shop(query):
 # =========================
 
 async def show_admin_orders(query, page=0):
-    total = db.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+    total = db.execute(
+        "SELECT COUNT(*) FROM orders"
+    ).fetchone()[0]
 
     counts = db.execute("""
         SELECT status, COUNT(*)
@@ -238,12 +269,17 @@ async def show_admin_orders(query, page=0):
     """).fetchall()
 
     stats = dict(counts)
+
     pending = stats.get("pending", 0)
     completed = stats.get("completed", 0)
     refunded = stats.get("refunded", 0)
 
+    test_total = db.execute(
+        "SELECT COUNT(*) FROM orders WHERE is_test=1"
+    ).fetchone()[0]
+
     orders = db.execute("""
-        SELECT id, product, status
+        SELECT id, product, status, is_test
         FROM orders
         ORDER BY id DESC
         LIMIT 8 OFFSET ?
@@ -254,43 +290,62 @@ async def show_admin_orders(query, page=0):
         f"📦 مجموع الطلبات: {total}\n"
         f"⏳ قيد المراجعة: {pending}\n"
         f"✅ مكتملة: {completed}\n"
-        f"❌ ملغاة: {refunded}\n\n"
+        f"❌ ملغاة: {refunded}\n"
+        f"🧪 طلبات تجريبية: {test_total}\n\n"
         "👇 اضغط على أي طلب لعرض تفاصيله:"
     )
 
     keyboard = []
 
-    for order_id, product, status in orders:
+    for order_id, product, status, is_test in orders:
         status_icon = {
             "pending": "⏳",
             "completed": "✅",
             "refunded": "❌",
         }.get(status, "❔")
 
+        test_icon = "🧪 " if is_test else ""
+
         keyboard.append([
             InlineKeyboardButton(
-                f"{status_icon} الطلب #{order_id} - {product}",
+                f"{status_icon} {test_icon}الطلب #{order_id} - {product}",
                 callback_data=f"order_view:{order_id}:{page}",
             )
         ])
 
     navigation = []
+
     if page > 0:
         navigation.append(
-            InlineKeyboardButton("⬅️ السابق", callback_data=f"admin_orders:{page-1}")
+            InlineKeyboardButton(
+                "⬅️ السابق",
+                callback_data=f"admin_orders:{page-1}",
+            )
         )
+
     if (page + 1) * 8 < total:
         navigation.append(
-            InlineKeyboardButton("التالي ➡️", callback_data=f"admin_orders:{page+1}")
+            InlineKeyboardButton(
+                "التالي ➡️",
+                callback_data=f"admin_orders:{page+1}",
+            )
         )
+
     if navigation:
         keyboard.append(navigation)
 
     keyboard.append([
-        InlineKeyboardButton("🔄 تحديث", callback_data=f"admin_orders:{page}")
+        InlineKeyboardButton(
+            "🔄 تحديث",
+            callback_data=f"admin_orders:{page}",
+        )
     ])
+
     keyboard.append([
-        InlineKeyboardButton("🔙 لوحة الإدارة", callback_data="admin")
+        InlineKeyboardButton(
+            "🔙 لوحة الإدارة",
+            callback_data="admin",
+        )
     ])
 
     await query.edit_message_text(
@@ -302,7 +357,7 @@ async def show_admin_orders(query, page=0):
 async def show_admin_order_details(query, order_id, page=0):
     order = db.execute("""
         SELECT id, user_id, product, price,
-               player_id, status, created_at
+               player_id, status, created_at, is_test
         FROM orders
         WHERE id=?
     """, (order_id,)).fetchone()
@@ -314,13 +369,19 @@ async def show_admin_order_details(query, order_id, page=0):
         )
         return
 
-    oid, user, product, price, player, status, created = order
+    oid, user, product, price, player, status, created, is_test = order
 
     status_text = {
         "pending": "⏳ قيد المراجعة",
         "completed": "✅ مكتمل",
         "refunded": "❌ ملغى وتم إرجاع النقاط",
     }.get(status, status)
+
+    test_text = (
+        "🧪 طلب تجريبي - لا يوجد شحن حقيقي"
+        if is_test else
+        "طلب عادي"
+    )
 
     text = (
         f"📦 تفاصيل الطلب #{oid}\n\n"
@@ -330,21 +391,24 @@ async def show_admin_order_details(query, order_id, page=0):
         f"🆔 Player ID: {player}\n"
         f"🪙 السعر: {price} نقطة\n"
         f"📌 الحالة: {status_text}\n"
+        f"🧪 النوع: {test_text}\n"
         f"📅 التاريخ: {created or 'غير متوفر'}\n"
         "━━━━━━━━━━━━━━"
     )
 
     keyboard = []
+
     if status == "pending":
         keyboard.append([
             InlineKeyboardButton(
-                "✅ تأكيد إتمام الطلب",
+                "✅ تأكيد الطلب",
                 callback_data=f"order:approve:{oid}",
             )
         ])
+
         keyboard.append([
             InlineKeyboardButton(
-                "❌ رفض وإرجاع النقاط",
+                "❌ رفض الطلب",
                 callback_data=f"order:reject:{oid}",
             )
         ])
@@ -382,6 +446,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action == "daily":
         today = str(date.today())
+
         row = db.execute(
             "SELECT last_daily FROM users WHERE id=?",
             (uid,),
@@ -400,6 +465,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "UPDATE users SET last_daily=? WHERE id=?",
                     (today, uid),
                 )
+
             db.commit()
             msg = "🎉 تحصلت على 10 نقاط!"
 
@@ -423,7 +489,15 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "ff_shop":
         await show_ff_shop(query)
 
+    # Free Fire test purchase
     elif action.startswith("ff:"):
+        if not FF_TEST_MODE:
+            await query.edit_message_text(
+                "❌ متجر Free Fire غير متاح حالياً.",
+                reply_markup=menu(),
+            )
+            return
+
         try:
             pid = int(action.split(":")[1])
         except ValueError:
@@ -434,39 +508,39 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         name, price = FF_PACKS[pid]
 
-        if uid != OWNER_ID and balance(uid) < price:
-            await query.edit_message_text(
-                "❌ نقاطك غير كافية!\n\n"
-                f"سعر الباقة: {price} نقطة\n"
-                f"رصيدك: {balance(uid)} نقطة",
-                reply_markup=home_keyboard(),
-            )
-            return
-
         context.user_data["waiting_player_id"] = {
             "pack_id": pid,
             "name": name,
             "price": price,
+            "is_test": True,
         }
 
         await query.edit_message_text(
-            "💎 طلب شحن Free Fire\n\n"
+            "🧪 طلب تجريبي - Free Fire\n\n"
             f"الباقة: {name}\n"
-            f"السعر: {price} نقطة\n\n"
-            "🆔 أرسل Player ID الخاص بحسابك الآن.\n\n"
-            "⚠️ تأكد من صحة الرقم قبل الإرسال.",
+            f"السعر التجريبي: {price} نقطة\n\n"
+            "⚠️ هذا اختبار فقط.\n"
+            "لن يتم شحن الجواهر ولن يتم خصم النقاط.\n\n"
+            "🆔 أرسل Player ID للتجربة:",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ إلغاء", callback_data="cancel_ff")]
+                [
+                    InlineKeyboardButton(
+                        "❌ إلغاء",
+                        callback_data="cancel_ff",
+                    )
+                ]
             ]),
         )
 
     elif action == "cancel_ff":
         context.user_data.pop("waiting_player_id", None)
+
         await query.edit_message_text(
             "❌ تم إلغاء العملية.",
             reply_markup=menu(),
         )
 
+    # Normal services
     elif action.startswith("buy:"):
         try:
             pid = int(action.split(":")[1])
@@ -483,38 +557,40 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if uid != OWNER_ID:
                 result = db.execute(
-                    "UPDATE users SET points=points-? WHERE id=? AND points>=?",
+                    "UPDATE users SET points=points-? "
+                    "WHERE id=? AND points>=?",
                     (price, uid, price),
                 )
+
                 if result.rowcount != 1:
                     db.rollback()
+
                     await query.edit_message_text(
                         "❌ نقاطك غير كافية لشراء هذه الخدمة.",
                         reply_markup=home_keyboard(),
                     )
                     return
 
-            # حفظ الخدمات العادية في سجل الطلبات أيضاً
-            cursor = db.execute(
-                """
+            cursor = db.execute("""
                 INSERT INTO orders
-                (user_id, product, price, player_id, status, created_at)
-                VALUES (?, ?, ?, ?, 'pending', ?)
-                """,
-                (
-                    uid,
-                    name,
-                    price,
-                    "غير مطلوب",
-                    datetime.now(timezone.utc).isoformat(),
-                ),
-            )
+                (user_id, product, price, player_id,
+                 status, created_at, is_test)
+                VALUES (?, ?, ?, ?, 'pending', ?, 0)
+            """, (
+                uid,
+                name,
+                price,
+                "غير مطلوب",
+                now_utc(),
+            ))
+
             order_id = cursor.lastrowid
             db.commit()
 
         except Exception as exc:
             db.rollback()
             print(f"خطأ في تسجيل طلب الخدمة: {exc}")
+
             await query.edit_message_text(
                 "❌ حدث خطأ أثناء تسجيل الطلب. حاول مرة أخرى.",
                 reply_markup=menu(),
@@ -531,14 +607,18 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                "✅ تأكيد إتمام الطلب",
-                callback_data=f"order:approve:{order_id}",
-            )],
-            [InlineKeyboardButton(
-                "❌ رفض وإرجاع النقاط",
-                callback_data=f"order:reject:{order_id}",
-            )],
+            [
+                InlineKeyboardButton(
+                    "✅ تأكيد إتمام الطلب",
+                    callback_data=f"order:approve:{order_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ رفض وإرجاع النقاط",
+                    callback_data=f"order:reject:{order_id}",
+                )
+            ],
         ])
 
         await notify_owner(
@@ -554,7 +634,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action == "admin":
         if uid != OWNER_ID:
-            await query.edit_message_text("❌ هذه القائمة خاصة بالمالك.")
+            await query.edit_message_text(
+                "❌ هذه القائمة خاصة بالمالك."
+            )
             return
 
         await query.edit_message_text(
@@ -577,10 +659,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action == "admin_orders" or action.startswith("admin_orders:"):
         if uid != OWNER_ID:
-            await query.edit_message_text("❌ سجل الطلبات خاص بالمالك.")
+            await query.edit_message_text(
+                "❌ سجل الطلبات خاص بالمالك."
+            )
             return
 
         page = 0
+
         if ":" in action:
             try:
                 page = max(0, int(action.split(":")[1]))
@@ -591,37 +676,53 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action.startswith("order_view:"):
         if uid != OWNER_ID:
-            await query.edit_message_text("❌ هذه العملية خاصة بالإدارة.")
+            await query.edit_message_text(
+                "❌ هذه العملية خاصة بالإدارة."
+            )
             return
 
         try:
             parts = action.split(":")
             order_id = int(parts[1])
             page = int(parts[2])
-            await show_admin_order_details(query, order_id, page)
-        except (ValueError, IndexError):
-            await query.edit_message_text("❌ حدث خطأ في رقم الطلب.")
 
+            await show_admin_order_details(
+                query,
+                order_id,
+                page,
+            )
+
+        except (ValueError, IndexError):
+            await query.edit_message_text(
+                "❌ حدث خطأ في رقم الطلب."
+            )
+
+    # Approve / reject orders
     elif action.startswith("order:"):
         if uid != OWNER_ID:
-            await query.edit_message_text("❌ هذه العملية خاصة بالإدارة.")
+            await query.edit_message_text(
+                "❌ هذه العملية خاصة بالإدارة."
+            )
             return
 
         parts = action.split(":")
+
         if len(parts) != 3:
             return
 
         operation = parts[1]
+
         try:
             order_id = int(parts[2])
         except ValueError:
             return
 
-        order = db.execute(
-            "SELECT user_id, product, price, player_id, status "
-            "FROM orders WHERE id=?",
-            (order_id,),
-        ).fetchone()
+        order = db.execute("""
+            SELECT user_id, product, price,
+                   player_id, status, is_test
+            FROM orders
+            WHERE id=?
+        """, (order_id,)).fetchone()
 
         if not order or order[4] != "pending":
             await query.edit_message_text(
@@ -630,7 +731,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        user_id, product, price, player_id, status = order
+        user_id, product, price, player_id, status, is_test = order
 
         if operation == "approve":
             result = db.execute(
@@ -641,13 +742,27 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db.commit()
 
             if result.rowcount == 1:
+                if is_test:
+                    user_message = (
+                        "🧪 تم قبول طلبك التجريبي!\n\n"
+                        f"📦 الباقة: {product}\n"
+                        f"🆔 Player ID: {player_id}\n"
+                        f"رقم الطلب: #{order_id}\n\n"
+                        "⚠️ هذا اختبار فقط. لم يتم شحن أي جواهر "
+                        "ولم يتم خصم أي نقاط."
+                    )
+                else:
+                    user_message = (
+                        "✅ تم تأكيد إتمام طلبك!\n\n"
+                        f"📦 الخدمة: {product}\n"
+                        f"🆔 Player ID: {player_id}\n"
+                        f"رقم الطلب: #{order_id}"
+                    )
+
                 try:
                     await context.bot.send_message(
                         user_id,
-                        "✅ تم تأكيد إتمام طلبك!\n\n"
-                        f"📦 الخدمة/الباقة: {product}\n"
-                        f"🆔 Player ID: {player_id}\n"
-                        f"رقم الطلب: #{order_id}",
+                        user_message,
                     )
                 except Exception as exc:
                     print(f"تعذر إرسال إشعار للمستخدم: {exc}")
@@ -660,43 +775,63 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif operation == "reject":
             try:
                 db.execute("BEGIN IMMEDIATE")
+
                 result = db.execute(
                     "UPDATE orders SET status='refunded' "
                     "WHERE id=? AND status='pending'",
                     (order_id,),
                 )
 
-                if result.rowcount == 1 and user_id != OWNER_ID:
+                # Test orders never deducted points
+                if result.rowcount == 1 and user_id != OWNER_ID and not is_test:
                     db.execute(
                         "UPDATE users SET points=points+? WHERE id=?",
                         (price, user_id),
                     )
+
                 db.commit()
+
             except Exception as exc:
                 db.rollback()
                 print(f"خطأ في إرجاع النقاط: {exc}")
-                await query.edit_message_text("❌ حدث خطأ أثناء إلغاء الطلب.")
+
+                await query.edit_message_text(
+                    "❌ حدث خطأ أثناء إلغاء الطلب."
+                )
                 return
 
             if result.rowcount == 1:
+                if is_test:
+                    user_message = (
+                        "❌ تم رفض طلبك التجريبي.\n\n"
+                        f"📦 الباقة: {product}\n"
+                        f"رقم الطلب: #{order_id}\n\n"
+                        "🧪 لم يتم خصم أي نقاط، لأنه طلب تجريبي."
+                    )
+                else:
+                    user_message = (
+                        "❌ تم إلغاء طلبك.\n\n"
+                        f"📦 الخدمة: {product}\n"
+                        f"🪙 تمت إعادة {price} نقطة إلى رصيدك.\n"
+                        f"رقم الطلب: #{order_id}"
+                    )
+
                 try:
                     await context.bot.send_message(
                         user_id,
-                        "❌ تم إلغاء طلبك.\n\n"
-                        f"📦 الخدمة/الباقة: {product}\n"
-                        f"🪙 تمت إعادة {price} نقطة إلى رصيدك.\n"
-                        f"رقم الطلب: #{order_id}",
+                        user_message,
                     )
                 except Exception as exc:
                     print(f"تعذر إرسال إشعار للمستخدم: {exc}")
 
                 await query.edit_message_text(
-                    f"↩️ تم إلغاء الطلب #{order_id} وإرجاع النقاط.",
+                    f"↩️ تم إلغاء الطلب #{order_id}.",
                     reply_markup=admin_keyboard(),
                 )
 
     elif action == "home":
         context.user_data.pop("waiting_player_id", None)
+
         await query.edit_message_text(
             "👑 ZADX POINTS STORE\n\nاختر من القائمة:",
             reply_markup=menu(),
@@ -728,12 +863,15 @@ async def handle_player_id(
 
     name = pending["name"]
     price = pending["price"]
+    is_test = bool(pending.get("is_test", False))
+
     register(uid)
 
     try:
         db.execute("BEGIN IMMEDIATE")
 
-        if uid != OWNER_ID:
+        # Only real normal orders deduct points
+        if uid != OWNER_ID and not is_test:
             result = db.execute(
                 "UPDATE users SET points=points-? "
                 "WHERE id=? AND points>=?",
@@ -743,32 +881,34 @@ async def handle_player_id(
             if result.rowcount != 1:
                 db.rollback()
                 context.user_data.pop("waiting_player_id", None)
+
                 await update.message.reply_text(
                     "❌ نقاطك غير كافية الآن.",
                     reply_markup=menu(),
                 )
                 return
 
-        cursor = db.execute(
-            """
+        cursor = db.execute("""
             INSERT INTO orders
-            (user_id, product, price, player_id, status, created_at)
-            VALUES (?, ?, ?, ?, 'pending', ?)
-            """,
-            (
-                uid,
-                name,
-                price,
-                player_id,
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
+            (user_id, product, price, player_id,
+             status, created_at, is_test)
+            VALUES (?, ?, ?, ?, 'pending', ?, ?)
+        """, (
+            uid,
+            name,
+            price,
+            player_id,
+            now_utc(),
+            1 if is_test else 0,
+        ))
+
         order_id = cursor.lastrowid
         db.commit()
 
     except Exception as exc:
         db.rollback()
-        print(f"خطأ أثناء تسجيل طلب Free Fire: {exc}")
+        print(f"خطأ أثناء تسجيل الطلب: {exc}")
+
         await update.message.reply_text(
             "❌ حدث خطأ أثناء تسجيل الطلب. حاول مرة أخرى."
         )
@@ -776,25 +916,44 @@ async def handle_player_id(
 
     context.user_data.pop("waiting_player_id", None)
 
+    if is_test:
+        user_message = (
+            "🧪 تم تسجيل طلبك التجريبي!\n\n"
+            f"💎 الباقة: {name}\n"
+            f"🆔 Player ID: {player_id}\n"
+            f"📦 رقم الطلب: #{order_id}\n\n"
+            "⚠️ لم يتم شحن الجواهر.\n"
+            "⚠️ لم يتم خصم أي نقاط.\n"
+            "الطلب ينتظر مراجعة الإدارة."
+        )
+    else:
+        user_message = (
+            "✅ تم تسجيل طلبك بنجاح!\n\n"
+            f"💎 الباقة: {name}\n"
+            f"🆔 Player ID: {player_id}\n"
+            f"🪙 السعر: {price} نقطة\n"
+            f"📦 رقم الطلب: #{order_id}\n\n"
+            "⏳ طلبك قيد المراجعة من الإدارة."
+        )
+
     await update.message.reply_text(
-        "✅ تم تسجيل طلبك بنجاح!\n\n"
-        f"💎 الباقة: {name}\n"
-        f"🆔 Player ID: {player_id}\n"
-        f"🪙 السعر: {price} نقطة\n"
-        f"📦 رقم الطلب: #{order_id}\n\n"
-        "⏳ طلبك قيد المراجعة من الإدارة.",
+        user_message,
         reply_markup=menu(),
     )
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "✅ تأكيد إتمام الشحن",
-            callback_data=f"order:approve:{order_id}",
-        )],
-        [InlineKeyboardButton(
-            "❌ رفض وإرجاع النقاط",
-            callback_data=f"order:reject:{order_id}",
-        )],
+        [
+            InlineKeyboardButton(
+                "✅ تأكيد الطلب",
+                callback_data=f"order:approve:{order_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "❌ رفض الطلب",
+                callback_data=f"order:reject:{order_id}",
+            )
+        ],
     ])
 
     await notify_owner(
@@ -804,7 +963,8 @@ async def handle_player_id(
         f"المستخدم: {uid}\n"
         f"الباقة: {name}\n"
         f"Player ID: {player_id}\n"
-        f"السعر: {price} نقطة\n\n"
+        f"السعر التجريبي: {price} نقطة\n"
+        f"النوع: {'🧪 تجريبي' if is_test else 'عادي'}\n"
         "الحالة: قيد المراجعة",
         keyboard,
     )
@@ -823,8 +983,10 @@ async def addpoints(
 
     if len(context.args) != 2:
         await update.message.reply_text(
-            "طريقة الاستعمال:\n/addpoints USER_ID AMOUNT\n\n"
-            "مثال:\n/addpoints 123456789 100"
+            "طريقة الاستعمال:\n"
+            "/addpoints USER_ID AMOUNT\n\n"
+            "مثال:\n"
+            "/addpoints 123456789 100"
         )
         return
 
@@ -836,6 +998,7 @@ async def addpoints(
             raise ValueError
 
         register(target)
+
         db.execute(
             "UPDATE users SET points=points+? WHERE id=?",
             (amount, target),
@@ -855,7 +1018,9 @@ async def addpoints(
             pass
 
     except ValueError:
-        await update.message.reply_text("❌ تحقق من الأرقام والمبلغ.")
+        await update.message.reply_text(
+            "❌ تحقق من الأرقام والمبلغ."
+        )
 
 
 # =========================
@@ -864,13 +1029,16 @@ async def addpoints(
 
 def main():
     if not TOKEN or not OWNER_ID:
-        raise RuntimeError("يجب ضبط BOT_TOKEN و OWNER_ID في متغيرات البيئة.")
+        raise RuntimeError(
+            "يجب ضبط BOT_TOKEN و OWNER_ID في متغيرات البيئة."
+        )
 
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("addpoints", addpoints))
     app.add_handler(CallbackQueryHandler(buttons))
+
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -879,6 +1047,7 @@ def main():
     )
 
     print("ZADX POINTS STORE is running!")
+
     app.run_polling()
 
 
